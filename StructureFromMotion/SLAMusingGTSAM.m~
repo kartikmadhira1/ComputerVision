@@ -1,0 +1,287 @@
+% function [LandMarksComputed, AllPosesComputed] = SLAMusingGTSAM(DetAll, K, TagSize, qIMUToC, TIMUToC,...
+%                                                 IMU, LeftImgs, TLeftImgs, Mode)
+% For Input and Output specifications refer to the project pdf
+
+% import gtsam.*
+% % Refer to Factor Graphs and GTSAM Introduction
+% % https://research.cc.gatech.edu/borg/sites/edu.borg/files/downloads/gtsam.pdf
+% % and the examples in the library in the GTSAM toolkit. See folder
+% % gtsam_toolbox/gtsam_examples
+% end
+
+
+import gtsam.*
+ToolboxPath = 'gtsam_toolbox';
+
+
+load('/home/kartikmadhira/Desktop/final_project_files/CalibParams.mat');
+% load('/home/kartikmadhira/Desktop/final_project_files/DataMappingShort.mat');
+load('/home/kartikmadhira/Desktop/final_project_files/DataSquare.mat','DetAll');
+% load('/home/kartikmadhira/Desktop/final_project_files/DataSquareNew.mat');
+
+%simulate the intial covariances in the measurement
+measurementNoiseSigma = 1.0;
+pointNoiseSigma = 0.1;
+poseNoiseSigmas = [0.001 0.001 0.001 0.1 0.1 0.1]';
+
+graph = NonlinearFactorGraph;
+% 
+measurementNoise = noiseModel.Isotropic.Sigma(2,measurementNoiseSigma);
+Kconv=gtsam.Cal3_S2(K(1,1),K(2,2),0,K(1,3),K(2,3));
+% for i=1:length(DetAll)
+%     for k=1:length(DetAll{i})
+%         for a=1:4
+%             j = DetAll{1,i}(k,1);
+%             coors=DetAll{1,i}(k,a+1:a+2);
+%             point2=gtsam.Point2(coors(1),coors(2));
+%             graph.add(GenericProjectionFactorCal3_S2(point2, measurementNoise, symbol('x',i), symbol('p',j), Kconv));
+%         end
+%     end
+% end
+
+%% adding the inial pose for the sytem
+
+%find the tag number 10 and its corresponding points
+index=find(DetAll{1,1}(:,1)==10);
+%assuming the world coordinates to be at the 10th tag
+p1X=0;
+p1Y=0;
+%p2x-p1x=World P2 coordinates
+p2X=p1X+TagSize;
+p2Y=0;
+%%p3x-p3x=World P3 coordinates
+p3X=p1X+TagSize;
+p3Y=p1Y+TagSize;
+%%p3x-p3x=World P4 coordinates
+p4X=0;
+p4Y=p1Y+TagSize;
+
+%% image coordinates of the initial pose
+p1x=DetAll{1,1}(index,2);
+p1y=DetAll{1,1}(index,3);
+
+p2x=DetAll{1,1}(index,4);
+p2y=DetAll{1,1}(index,5);
+
+p3x=DetAll{1,1}(index,6);
+p3y=DetAll{1,1}(index,7);
+
+p4x=DetAll{1,1}(index,8);
+p4y=DetAll{1,1}(index,9);
+
+%% Initial image coordinates of the system 
+xImage=[p1x p1y
+   p2x p2y;
+   p3x p3y;
+   p4x p4y];
+    
+XWorld=[p1X p1Y;
+   p2X p2Y;
+   p3X p3Y;
+   p4X p4Y];
+ 
+%% find homography and take the inverse 
+H=homography_solve(XWorld',xImage');
+H=H/H(3,3);
+interH=inv(K)*H;
+
+%% SVD to calculate the R,T
+
+[U,S,V]=svd([interH(:,1) interH(:,2) cross(interH(:,1),interH(:,2))]);
+
+Rinit=U*[1 0 0; 0 1 0; 0 0 det(U*transpose(V))]*transpose(V);
+
+Tinit=interH(:,3)/norm(interH(:,1));
+
+%% initial Landmarks positions calculation
+
+initLandmarks = [];
+initLandmarks.pos = [];
+initLandmarks.Id=[];
+j=1;
+for i=1:length(DetAll{1})
+    p1=[DetAll{1,1}(i,2:3) 1]';
+    p2=[DetAll{1,1}(i,4:5) 1]';
+    p3=[DetAll{1,1}(i,6:7) 1]';
+    p4=[DetAll{1,1}(i,8:9) 1]';
+    %DIVIDE LAST ELEMENT OF H MATRIX BY h33
+    initLandmarks.pos(j,:)=H\p1;
+    temp = initLandmarks.pos(j,:);
+    initLandmarks.pos(j,:)=initLandmarks.pos(j,:)/temp(1,3);
+    initLandmarks.pos(j+1,:)=H\p2;
+    temp = initLandmarks.pos(j+1,:);
+    initLandmarks.pos(j+1,:)=initLandmarks.pos(j+1,:)/temp(1,3);
+    initLandmarks.pos(j+2,:)=H\p3;
+    temp = initLandmarks.pos(j+2,:);
+    initLandmarks.pos(j+2,:)=initLandmarks.pos(j+2,:)/temp(1,3);
+    initLandmarks.pos(j+3,:)=H\p4;
+    temp = initLandmarks.pos(j+3,:);
+    initLandmarks.pos(j+3,:)=initLandmarks.pos(j+3,:)/temp(1,3);
+    
+    
+    initLandmarks.Id(j)=DetAll{1,1}(i,1);
+    initLandmarks.Id(j+1)=nan;
+    initLandmarks.Id(j+2)=nan;
+    initLandmarks.Id(j+3)=nan;
+    j=j+4;
+end
+
+scatter(initLandmarks.pos(:,1) ,initLandmarks.pos(:,2))
+
+%% second image pose calculation
+
+xImageDash = [];
+xWorldDash = [];
+
+%stack for landmarks not in common
+unCommonLandPos=[];
+unCommonLandId=[];
+
+%cell for storing rotations and translations
+initRotations=cell(1,length(DetAll));
+initTrans=cell(1,length(DetAll));
+
+for h=2:length(DetAll)
+    for i=1:length(DetAll{h})
+        ind = find(initLandmarks(:).Id==DetAll{1,h}(i,1));
+        if(ind)    
+            p1x=DetAll{1,h}(i,2);
+            p1y=DetAll{1,h}(i,3);
+
+            p2x=DetAll{1,h}(i,4);
+            p2y=DetAll{1,h}(i,5);
+
+            p3x=DetAll{1,h}(i,6);
+            p3y=DetAll{1,h}(i,7);
+
+            p4x=DetAll{1,h}(i,8);
+            p4y=DetAll{1,h}(i,9);
+
+            xTemp=[p1x p1y
+                   p2x p2y;
+                   p3x p3y;
+                   p4x p4y];
+
+            xImageDash = vertcat(xImageDash,xTemp);
+            p1=initLandmarks.pos(ind,:);
+            %p2x-p1x=World P2 coordinates
+            p2=initLandmarks.pos(ind+1,:);
+            p3=initLandmarks.pos(ind+2,:);
+            %%p3x-p3x=World P3 coordinates
+            p4=initLandmarks.pos(ind+3,:);
+
+            xTemp=[p1(:,1) p1(:,2);
+                   p2(:,1) p2(:,2);
+                   p3(:,1) p3(:,2);
+                   p4(:,1) p4(:,2)];
+            xWorldDash = vertcat(xWorldDash,xTemp);
+        else
+            p1x=DetAll{1,h}(i,2);
+            p1y=DetAll{1,h}(i,3);
+
+            p2x=DetAll{1,h}(i,4);
+            p2y=DetAll{1,h}(i,5);
+
+            p3x=DetAll{1,h}(i,6);
+            p3y=DetAll{1,h}(i,7);
+
+            p4x=DetAll{1,h}(i,8);
+            p4y=DetAll{1,h}(i,9);
+            xTemp=[p1x p1y
+                   p2x p2y;
+                   p3x p3y;
+                   p4x p4y];
+
+            unCommonLandPos=vertcat(unCommonLandPos,xTemp);           
+            unCommonLandId=vertcat(unCommonLandId,DetAll{1,h}(i,1));
+            for idd = 1:3
+                unCommonLandId=vertcat(unCommonLandId,nan);
+            end
+        end
+        %estimate homography to get the intermediate H
+        H=homography_solve(xWorldDash',xImageDash');
+        H=H/H(3,3);
+        interH=inv(K)*H;
+        
+        %calculating the R and T of this image with respect to the world
+        %frame
+        [U,S,V]=svd([interH(:,1) interH(:,2) cross(interH(:,1),interH(:,2))]);
+        R=U*[1 0 0; 0 1 0; 0 0 det(U*transpose(V))]*transpose(V);
+        T=interH(:,3)/norm(interH(:,1));
+        
+        %reproject the points that are not in common and store them in
+        %initLandmarks.
+        j=length(initLandmarks.pos);
+        for uncom=1:4:length(unCommonLandPos)
+            p1=unCommonLandPos(uncom,:);
+            p2=unCommonLandPos(uncom+1,:);
+            p3=unCommonLandPos(uncom+2,:);
+            p4=unCommonLandPos(uncom+3,:);
+
+            %DIVIDE LAST ELEMENT OF H MATRIX BY h33
+            t1=H\p1;
+            initLandmarks.pos(j,:)=t1/t1(1,3);
+            t1=H\p2;
+            initLandmarks.pos(j+1,:)=t1/temp(1,3);
+            initLandmarks.pos(j+2,:)=H\p3;
+            temp = initLandmarks.pos(j+2,:);
+            initLandmarks.pos(j+2,:)=initLandmarks.pos(j+2,:)/temp(1,3);
+            initLandmarks.pos(j+3,:)=H\p4;
+            temp = initLandmarks.pos(j+3,:);
+            initLandmarks.pos(j+3,:)=initLandmarks.pos(j+3,:)/temp(1,3);
+
+     
+    end
+end
+
+%% SVD to calculate the R,T
+
+
+
+
+
+function points=reProj(imageCoors,H)
+    %image coordinates are in the form of 3*1 vector
+    %CHANGE H TO R,T IF THINGS DONT WORK.
+    points=inv(H)*imageCoors;
+end
+
+
+%%
+
+function  v = homography_solve(pin, pout)
+% HOMOGRAPHY_SOLVE finds a homography from point pairs
+%   V = HOMOGRAPHY_SOLVE(PIN, POUT) takes a 2xN matrix of input vectors and
+%   a 2xN matrix of output vectors, and returns the homogeneous
+%   transformation matrix that maps the inputs to the outputs, to some
+%   approximation if there is noise.
+%
+%   This uses the SVD method of
+%   http://www.robots.ox.ac.uk/%7Evgg/presentations/bmvc97/criminispaper/node3.html
+% David Young, University of Sussex, February 2008
+if ~isequal(size(pin), size(pout))
+    error('Points matrices different sizes');
+end
+if size(pin, 1) ~= 2
+    error('Points matrices must have two rows');
+end
+n = size(pin, 2);
+if n < 4
+    error('Need at least 4 matching points');
+end
+% Solve equations using SVD
+x = pout(1, :); y = pout(2,:); X = pin(1,:); Y = pin(2,:);
+rows0 = zeros(3, n);
+rowsXY = -[X; Y; ones(1,n)];
+hx = [rowsXY; rows0; x.*X; x.*Y; x];
+hy = [rows0; rowsXY; y.*X; y.*Y; y];
+h = [hx hy];
+if n == 4
+    [U, ~, ~] = svd(h);
+else
+    [U, ~, ~] = svd(h, 'econ');
+end
+v = (reshape(U(:,9), 3, 3)).';
+end
+
+
