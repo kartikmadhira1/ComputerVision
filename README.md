@@ -15,9 +15,12 @@
 
 3. **Panorama Stiching**
 
-![image](PanoStiching/set1pano.jpg)
+
 ![image](PanoStiching/set2pano.jpg)
-
-![image](PanoStiching/set3pano.jpg)
-
 ![image](PanoStiching/test1pano.jpg)
+
+
+4. **GMM - Gaussian Mixture Model segmentation**
+
+![image](GMM/results/GMM_ellipsoid.png)
+![image](GMM/results/RGB_pixel_distribution.png)
